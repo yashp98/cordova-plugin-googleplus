@@ -3,6 +3,8 @@ package nl.xservices.plugins;
 import android.accounts.Account;
 import android.accounts.AccountManager;
 import android.accounts.AccountManagerFuture;
+import android.accounts.AuthenticatorException;
+import android.accounts.OperationCanceledException;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
@@ -22,6 +24,7 @@ import com.google.android.gms.common.api.Status;
 import com.google.android.gms.common.api.Scope;
 
 import org.apache.cordova.*;
+import org.apache.cordova.engine.SystemWebChromeClient;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -34,12 +37,6 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.security.MessageDigest;
 import android.content.pm.Signature;
-
-import androidx.activity.result.ActivityResult;
-import androidx.activity.result.ActivityResultCallback;
-import androidx.activity.result.ActivityResultLauncher;
-import androidx.activity.result.contract.ActivityResultContracts;
-import androidx.appcompat.app.AppCompatActivity;
 
 /**
  * Originally written by Eddy Verbruggen (http://github.com/EddyVerbruggen/cordova-plugin-googleplus)
@@ -73,25 +70,9 @@ public class GooglePlus extends CordovaPlugin implements GoogleApiClient.OnConne
     private GoogleApiClient mGoogleApiClient;
     private CallbackContext savedCallbackContext;
 
-    private ActivityResultLauncher<Intent>  signInActivityLauncher;
-
     @Override
     public void initialize(CordovaInterface cordova, CordovaWebView webView) {
         super.initialize(cordova, webView);
-
-        AppCompatActivity cordovaActivity = cordova.getActivity();
-
-        this.signInActivityLauncher = cordovaActivity.registerForActivityResult(
-                new ActivityResultContracts.StartActivityForResult(),
-                new ActivityResultCallback<ActivityResult>() {
-                    public void onActivityResult(ActivityResult result) {
-                        Log.i(TAG, "One of our activities finished up");
-                        // Call handleSignInResult passing in sign in result object
-                        Intent intent = result.getData();
-                        handleSignInResult(Auth.GoogleSignInApi.getSignInResultFromIntent(intent));
-                    }
-                });
-
     }
 
     @Override
@@ -108,6 +89,7 @@ public class GooglePlus extends CordovaPlugin implements GoogleApiClient.OnConne
 
             // Tries to Log the user in
             Log.i(TAG, "Trying to Log in!");
+            cordova.setActivityResultCallback(this); //sets this class instance to be an activity result listener
             signIn();
 
         } else if (ACTION_TRY_SILENT_LOGIN.equals(action)) {
@@ -212,7 +194,7 @@ public class GooglePlus extends CordovaPlugin implements GoogleApiClient.OnConne
      */
     private void signIn() {
         Intent signInIntent = Auth.GoogleSignInApi.getSignInIntent(this.mGoogleApiClient);
-        this.signInActivityLauncher.launch(signInIntent);
+        cordova.getActivity().startActivityForResult(signInIntent, RC_GOOGLEPLUS);
     }
 
     /**
@@ -292,6 +274,31 @@ public class GooglePlus extends CordovaPlugin implements GoogleApiClient.OnConne
         savedCallbackContext.error(result.getErrorCode());
     }
 
+    /**
+     * Listens for and responds to an activity result. If the activity result request code matches our own,
+     * we know that the sign in Intent that we started has completed.
+     *
+     * The result is retrieved and send to the handleSignInResult function.
+     *
+     * @param requestCode The request code originally supplied to startActivityForResult(),
+     * @param resultCode The integer result code returned by the child activity through its setResult().
+     * @param intent Information returned by the child activity
+     */
+    @Override
+    public void onActivityResult(int requestCode, final int resultCode, final Intent intent) {
+        super.onActivityResult(requestCode, resultCode, intent);
+
+        Log.i(TAG, "In onActivityResult");
+
+        if (requestCode == RC_GOOGLEPLUS) {
+            Log.i(TAG, "One of our activities finished up");
+            //Call handleSignInResult passing in sign in result object
+            handleSignInResult(Auth.GoogleSignInApi.getSignInResultFromIntent(intent));
+        }
+        else {
+            Log.i(TAG, "This wasn't one of our activities");
+        }
+    }
 
     /**
      * Function for handling the sign in result
