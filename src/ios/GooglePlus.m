@@ -1,126 +1,156 @@
-#import <GoogleOpenSource/GoogleOpenSource.h>
 #import "AppDelegate.h"
+#import "objc/runtime.h"
 #import "GooglePlus.h"
-
-// need to swap out a method, so swizzling it here
-static void swizzleMethod(Class class, SEL destinationSelector, SEL sourceSelector);
-
-@implementation AppDelegate (IdentityUrlHandling)
-
-+ (void)load {
-  swizzleMethod([AppDelegate class],
-                @selector(application:openURL:sourceApplication:annotation:),
-                @selector(identity_application:openURL:sourceApplication:annotation:));
-}
-
-- (BOOL)identity_application: (UIApplication *)application
-                     openURL: (NSURL *)url
-           sourceApplication: (NSString *)sourceApplication
-                  annotation: (id)annotation {
-
-  if (url && [url.path rangeOfString:@"oauth2callback"].location != NSNotFound) {
-    return [GPPURLHandler handleURL:url sourceApplication:sourceApplication annotation:annotation];
-  } else {
-    // call super
-    return [self identity_application:application openURL:url sourceApplication:sourceApplication annotation:annotation];
-  }
-}
-
-@end
 
 @implementation GooglePlus
 
+- (void)pluginInitialize
+{
+    NSLog(@"GooglePlus pluginInitizalize");
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleOpenURL:) name:CDVPluginHandleOpenURLNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(handleOpenURLWithAppSourceAndAnnotation:) name:CDVPluginHandleOpenURLWithAppSourceAndAnnotationNotification object:nil];
+}
+
+- (void)handleOpenURL:(NSNotification*)notification
+{
+    // no need to handle this handler, we dont have an sourceApplication here, which is required by GIDSignIn handleURL
+}
+
+- (void)handleOpenURLWithAppSourceAndAnnotation:(NSNotification*)notification
+{
+    NSMutableDictionary * options = [notification object];
+
+    NSURL* url = options[@"url"];
+
+    NSString* possibleReversedClientId = [url.absoluteString componentsSeparatedByString:@":"].firstObject;
+
+    if ([possibleReversedClientId isEqualToString:self.getreversedClientId] && self.isSigningIn) {
+        self.isSigningIn = NO;
+        [GIDSignIn.sharedInstance handleURL:url];
+    }
+}
+
+
 - (void) login:(CDVInvokedUrlCommand*)command {
-  [[self getGooglePlusSignInObject:command] authenticate];
+    _callbackId = command.callbackId;
+    NSString *reversedClientId = [self getreversedClientId];
+
+    if (reversedClientId == nil) {
+        NSDictionary *errorDetails = @{@"status": @"error", @"message": @"Could not find REVERSED_CLIENT_ID url scheme in app .plist"};
+        CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:[self toJSONString:errorDetails]];
+        [self.commandDelegate sendPluginResult:pluginResult callbackId:_callbackId];
+        return;
+    }
+
+    NSString *clientId = [self reverseUrlScheme:reversedClientId];
+
+    GIDConfiguration *config = [[GIDConfiguration alloc] initWithClientID:clientId];
+
+    GIDSignIn *signIn = GIDSignIn.sharedInstance;
+
+    [signIn signInWithConfiguration:config presentingViewController:self.viewController callback:^(GIDGoogleUser * _Nullable user, NSError * _Nullable error) {
+        if (error) {
+            NSDictionary *errorDetails = @{@"status": @"error", @"message": error.localizedDescription};
+            CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:[self toJSONString:errorDetails]];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:self->_callbackId];
+        } else {
+            NSString *email = user.profile.email;
+            NSString *userId = user.userID;
+            NSURL *imageUrl = [user.profile imageURLWithDimension:120]; // TODO pass in img size as param, and try to sync with Android
+            NSDictionary *result = @{
+                           @"email"           : email,
+                           @"userId"          : userId,
+                           @"idToken"         : user.authentication.idToken,
+                           @"displayName"     : user.profile.name       ? : [NSNull null],
+                           @"givenName"       : user.profile.givenName  ? : [NSNull null],
+                           @"familyName"      : user.profile.familyName ? : [NSNull null],
+                           @"imageUrl"        : imageUrl ? imageUrl.absoluteString : [NSNull null],
+                           };
+
+            CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString: [self toJSONString:result]];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:self->_callbackId];
+        }
+    }];
 }
 
-- (void) trySilentLogin:(CDVInvokedUrlCommand*)command {
-  // trySilentAuthentication doesn't call delegate when it fails, so handle it here
-  if (![[self getGooglePlusSignInObject:command] trySilentAuthentication]) {
-    CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"no valid token"];
-    [self writeJavascript:[pluginResult toErrorCallbackString:command.callbackId]];
-  }
+
+- (NSString*) reverseUrlScheme:(NSString*)scheme {
+    NSArray* originalArray = [scheme componentsSeparatedByString:@"."];
+    NSArray* reversedArray = [[originalArray reverseObjectEnumerator] allObjects];
+    NSString* reversedString = [reversedArray componentsJoinedByString:@"."];
+    return reversedString;
 }
 
-- (GPPSignIn*) getGooglePlusSignInObject:(CDVInvokedUrlCommand*)command {
-  _callbackId = command.callbackId;
-  NSDictionary* options = [command.arguments objectAtIndex:0];
-  NSString* apiKey = [options objectForKey:@"iOSApiKey"];
-  if (apiKey == nil) {
-    CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"iOSApiKey not set"];
-    [self writeJavascript:[pluginResult toErrorCallbackString:_callbackId]];
+- (NSString*) getreversedClientId {
+    NSArray* URLTypes = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleURLTypes"];
+
+    if (URLTypes != nil) {
+        for (NSDictionary* dict in URLTypes) {
+            NSString *urlName = dict[@"CFBundleURLName"];
+            if ([urlName isEqualToString:@"REVERSED_CLIENT_ID"]) {
+                NSArray* URLSchemes = dict[@"CFBundleURLSchemes"];
+                if (URLSchemes != nil) {
+                    return URLSchemes[0];
+                }
+            }
+        }
+    }
     return nil;
-  }
-  
-  GPPSignIn *signIn = [GPPSignIn sharedInstance];
-  signIn.shouldFetchGooglePlusUser = YES;
-  signIn.shouldFetchGoogleUserEmail = YES;
-  signIn.clientID = apiKey;
-  signIn.scopes = @[kGTLAuthScopePlusLogin];
-  signIn.attemptSSO = YES; // tries to use other installed Google apps
-  signIn.delegate = self;
-  return signIn;
 }
 
 - (void) logout:(CDVInvokedUrlCommand*)command {
-  [[GPPSignIn sharedInstance] signOut];
-  CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"logged out"];
-  [self writeJavascript:[pluginResult toSuccessCallbackString:command.callbackId]];
+    [GIDSignIn.sharedInstance signOut];
+    NSDictionary *details = @{@"status": @"success", @"message": @"Logged out"};
+    CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:[self toJSONString:details]];
+    [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
 }
 
 - (void) disconnect:(CDVInvokedUrlCommand*)command {
-  [[GPPSignIn sharedInstance] disconnect];
-  CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"disconnected"];
-  [self writeJavascript:[pluginResult toSuccessCallbackString:command.callbackId]];
+    [GIDSignIn.sharedInstance disconnectWithCallback:^(NSError * _Nullable error) {
+        if(error == nil) {
+            NSDictionary *details = @{@"status": @"success", @"message": @"Disconnected"};
+            CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:[self toJSONString:details]];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+        } else {
+            NSDictionary *details = @{@"status": @"error", @"message": [error localizedDescription]};
+            CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:[self toJSONString:details]];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+        }
+    }];
 }
 
-- (void) share_unused:(CDVInvokedUrlCommand*)command {
-  // for a rainy day.. see for a (limited) example https://github.com/vleango/GooglePlus-PhoneGap-iOS/blob/master/src/ios/GPlus.m
+- (void) isSignedIn:(CDVInvokedUrlCommand*)command {
+    bool isSignedIn = [GIDSignIn.sharedInstance currentUser] != nil;
+    NSDictionary *details = @{@"status": @"success", @"message": (isSignedIn) ? @"true" : @"false"};
+    CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:[self toJSONString:details]];
+    [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
 }
 
-#pragma mark - GPPSignInDelegate
-- (void)finishedWithAuth:(GTMOAuth2Authentication *)auth
-                   error:(NSError *)error {
-  if (error) {
-    CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:error.localizedDescription];
-    [self writeJavascript:[pluginResult toErrorCallbackString:_callbackId]];
-  } else {
-    NSString *email = [GPPSignIn sharedInstance].userEmail;
-    GTLPlusPerson *person = [GPPSignIn sharedInstance].googlePlusUser;
-    NSDictionary *result;
-    
-    if (person == nil) {
-      result = @{
-                 @"email" : email
-                 };
-    } else {
-      result = @{
-                 @"email"       : email,
-                 @"displayName" : person.displayName ?: [NSNull null],
-                 @"gender"      : person.gender ?: [NSNull null],
-                 @"imageUrl"    : (person.image != nil && person.image.url != nil) ? person.image.url : [NSNull null],
-                 @"givenName"   : (person.name != nil && person.name.givenName != nil) ? person.name.givenName : [NSNull null],
-                 @"middleName"  : (person.name != nil && person.name.middleName != nil) ? person.name.middleName : [NSNull null],
-                 @"familyName"  : (person.name != nil && person.name.familyName != nil) ? person.name.familyName : [NSNull null]
-                 };
-    }
-    CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:result];
-    [self writeJavascript:[pluginResult toSuccessCallbackString:_callbackId]];
-  }
+#pragma mark - GIDSignInDelegate
+- (void)signIn:(GIDSignIn *)signIn didSignInForUser:(GIDGoogleUser *)user withError:(NSError *)error {
+
 }
 
-#pragma mark Swizzling
+- (void)signIn:(GIDSignIn *)signIn presentViewController:(UIViewController *)viewController {
+    self.isSigningIn = YES;
+    [self.viewController presentViewController:viewController animated:YES completion:nil];
+}
+
+- (void)signIn:(GIDSignIn *)signIn dismissViewController:(UIViewController *)viewController {
+    [self.viewController dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (NSString*)toJSONString:(NSDictionary*)dictionaryOrArray {
+    NSError *error;
+         NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dictionaryOrArray
+                                                       options:NSJSONWritingPrettyPrinted
+                                                         error:&error];
+         if (! jsonData) {
+            NSLog(@"%s: error: %@", __func__, error.localizedDescription);
+            return @"{}";
+         } else {
+            return [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+         }
+}
 
 @end
-
-static void swizzleMethod(Class class, SEL destinationSelector, SEL sourceSelector) {
-  Method destinationMethod = class_getInstanceMethod(class, destinationSelector);
-  Method sourceMethod = class_getInstanceMethod(class, sourceSelector);
-  
-  // If the method doesn't exist, add it.  If it does exist, replace it with the given implementation.
-  if (class_addMethod(class, destinationSelector, method_getImplementation(sourceMethod), method_getTypeEncoding(sourceMethod))) {
-    class_replaceMethod(class, destinationSelector, method_getImplementation(destinationMethod), method_getTypeEncoding(destinationMethod));
-  } else {
-    method_exchangeImplementations(destinationMethod, sourceMethod);
-  }
-}
